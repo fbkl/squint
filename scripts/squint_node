@@ -31,6 +31,7 @@ class SquintNode(object):
         self.quantize = rospy.get_param("~quantize", 0)
         self.palette = rospy.get_param("~palette", "256")
         self.autosize = rospy.get_param("~autosize", True)
+        self.keep_aspect = rospy.get_param("~keep_aspect", True)
         # Hard ceiling so a bad TermSize cannot ask for a 10000-column render.
         self.max_cols = rospy.get_param("~max_cols", 400)
         self.max_rows = rospy.get_param("~max_rows", 150)
@@ -38,6 +39,12 @@ class SquintNode(object):
         if self.palette not in ("256", "truecolor"):
             rospy.logwarn("squint: unknown palette %r, using 256", self.palette)
             self.palette = "256"
+
+        # ~cols/~rows are an ALLOWANCE, not the render size: with keep_aspect
+        # the render is the largest picture with the source's shape that fits
+        # inside them. A tmux pane is usually very wide and short, and a 4:3
+        # camera stretched to fill it is unreadable.
+        self.avail_cols, self.avail_rows = self.cols, self.rows
 
         self.latest = None
         self.dropped = 0
@@ -71,9 +78,26 @@ class SquintNode(object):
     def on_size(self, msg):
         cols = max(8, min(int(msg.cols), self.max_cols))
         rows = max(4, min(int(msg.rows), self.max_rows))
-        if (cols, rows) != (self.cols, self.rows):
-            rospy.loginfo("squint: viewer resized me to %dx%d", cols, rows)
-            self.cols, self.rows = cols, rows
+        if (cols, rows) != (self.avail_cols, self.avail_rows):
+            rospy.loginfo("squint: viewer gave me %dx%d to work with", cols, rows)
+            self.avail_cols, self.avail_rows = cols, rows
+
+    def fit(self, src_w, src_h):
+        """Largest (cols, rows) inside the allowance that keeps the source shape.
+
+        One character is one column wide and TWO pixels tall, so a render of
+        C columns by R rows represents a C x 2R pixel grid. Matching the source
+        aspect a = w/h therefore means C = 2*a*R, not C = a*R -- forgetting the
+        factor of two is how terminal image viewers end up half height.
+        """
+        if not self.keep_aspect or not src_w or not src_h:
+            return self.avail_cols, self.avail_rows
+
+        aspect = float(src_w) / float(src_h)
+        rows = min(self.avail_rows, int(self.avail_cols / (2.0 * aspect)))
+        rows = max(4, rows)
+        cols = min(self.avail_cols, int(2.0 * aspect * rows))
+        return max(8, cols), rows
 
     def on_tick(self, _event):
         # Do no work at all if nobody is looking. This runs next to a VIO
@@ -89,6 +113,7 @@ class SquintNode(object):
 
         try:
             rgb = decode_image(msg)
+            self.cols, self.rows = self.fit(msg.width, msg.height)
             ansi = to_ansi(rgb, self.cols, self.rows,
                            quantize=self.quantize, palette=self.palette)
         except Exception as exc:
