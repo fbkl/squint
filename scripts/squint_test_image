@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Publish a moving test pattern as sensor_msgs/Image.
+
+For checking that the squint pipeline works without needing a camera, and for
+seeing what a known picture looks like at a given character size before you
+trust the thing to tell you whether a marker is visible.
+
+    rosrun squint squint_test_image _encoding:=mono8
+"""
+
+import math
+
+import numpy as np
+import rospy
+from sensor_msgs.msg import Image
+
+
+def main():
+    rospy.init_node("squint_test_image")
+    w = rospy.get_param("~width", 640)
+    h = rospy.get_param("~height", 480)
+    enc = rospy.get_param("~encoding", "mono8")
+    rate_hz = rospy.get_param("~rate", 10.0)
+
+    pub = rospy.Publisher("image", Image, queue_size=1)
+    rate = rospy.Rate(rate_hz)
+    rospy.loginfo("squint_test_image: %dx%d %s at %.1f Hz on %s",
+                  w, h, enc, rate_hz, rospy.resolve_name("image"))
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    t0 = rospy.Time.now().to_sec()
+
+    while not rospy.is_shutdown():
+        t = rospy.Time.now().to_sec() - t0
+
+        # A gradient to show banding, plus a travelling bright blob standing in
+        # for a marker, plus a frame so you can see the edges of the field.
+        base = (xx / w * 120 + yy / h * 60)
+        cx, cy = w * (0.5 + 0.35 * math.cos(t)), h * (0.5 + 0.35 * math.sin(t))
+        blob = 255.0 * np.exp(-(((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 18.0 ** 2)))
+        img = np.clip(base + blob, 0, 255)
+        img[:4, :] = img[-4:, :] = img[:, :4] = img[:, -4:] = 255
+
+        msg = Image()
+        msg.header.stamp = rospy.Time.now()
+        msg.header.frame_id = "squint_test"
+        msg.height, msg.width, msg.encoding = h, w, enc
+        msg.is_bigendian = 0
+
+        if enc == "mono8":
+            buf = img.astype(np.uint8)
+            msg.step = w
+        elif enc in ("rgb8", "bgr8"):
+            g = img.astype(np.uint8)
+            buf = np.dstack([g, np.roll(g, 40, axis=1), np.roll(g, -40, axis=1)])
+            if enc == "bgr8":
+                buf = buf[:, :, ::-1]
+            msg.step = w * 3
+        else:
+            rospy.logfatal("squint_test_image cannot make %r", enc)
+            return
+
+        msg.data = buf.tobytes()
+        pub.publish(msg)
+        rate.sleep()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!--
+  Start a renderer next to one camera. Run this on the machine that OWNS the
+  camera: the point of squint is that the raw image never crosses the network.
+
+    roslaunch squint squint.launch camera:=/thorax/cam0/image_raw name:=thorax
+
+  then, in a tmux pane on your own machine:
+
+    rosrun squint squint_view _ns:=/thorax_squint
+-->
+<launch>
+  <arg name="camera"   doc="FULL image topic, e.g. /thorax/cam0/image_raw"/>
+  <arg name="name"     default="squint" doc="node name, so several can coexist"/>
+  <arg name="rate"     default="4.0"/>
+  <arg name="cols"     default="100"/>
+  <arg name="rows"     default="30"/>
+  <arg name="palette"  default="256"    doc="256 or truecolor"/>
+  <arg name="quantize" default="0"      doc="round channels to a multiple of N; 0 = off"/>
+  <arg name="autosize" default="true"   doc="let a viewer dictate the render size"/>
+
+  <node pkg="squint" type="squint_node" name="$(arg name)_squint" output="screen">
+    <remap from="image" to="$(arg camera)"/>
+    <param name="rate"     value="$(arg rate)"/>
+    <param name="cols"     value="$(arg cols)"/>
+    <param name="rows"     value="$(arg rows)"/>
+    <param name="palette"  value="$(arg palette)"/>
+    <param name="quantize" value="$(arg quantize)"/>
+    <param name="autosize" value="$(arg autosize)"/>
+  </node>
+</launch>

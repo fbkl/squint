@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Print an AnsiFrame onto this terminal. One tmux pane per camera.
+
+Run this wherever you are sitting. It is the half of squint that has a screen.
+
+It also tells the renderer how big this terminal is, so the picture is produced
+at exactly the size it will be displayed at. Scaling an image twice -- once on
+the pi, once here -- throws away detail for nothing, and the markers you are
+looking for are only a few characters across.
+"""
+
+import os
+import shutil
+import signal
+import sys
+
+import rospy
+from squint.msg import AnsiFrame, TermSize
+
+HIDE_CURSOR = "\x1b[?25l"
+SHOW_CURSOR = "\x1b[?25h"
+HOME = "\x1b[H"
+CLEAR_SCREEN = "\x1b[2J"
+CLEAR_LINE = "\x1b[K"
+CLEAR_BELOW = "\x1b[J"
+RESET = "\x1b[0m"
+
+# Rows we keep for ourselves: one status line, and one so the shell prompt does
+# not scroll the picture off the top when we exit.
+RESERVED_ROWS = 2
+
+
+class SquintView(object):
+
+    def __init__(self):
+        self.interactive = sys.stdout.isatty()
+        self.send_size = rospy.get_param("~send_size", True)
+        self.status = rospy.get_param("~status", True)
+
+        self.frames = 0
+        self.last_wall = None
+        self.fps = 0.0
+        self.last_bytes = 0
+        self.cleared = False
+        self.size = (0, 0)
+
+        # One param instead of two remaps, because this is meant to be typed
+        # into a tmux pane by hand:  rosrun squint squint_view _ns:=/thorax/squint
+        ns = rospy.get_param("~ns", "").rstrip("/")
+        ansi_topic = (ns + "/ansi") if ns else "ansi"
+        size_topic = (ns + "/size") if ns else "size"
+
+        self.size_pub = rospy.Publisher(size_topic, TermSize, queue_size=1, latch=True)
+        rospy.Subscriber(ansi_topic, AnsiFrame, self.on_frame, queue_size=1)
+        rospy.loginfo("squint_view: watching %s", rospy.resolve_name(ansi_topic))
+
+        if self.interactive:
+            sys.stdout.write(HIDE_CURSOR + CLEAR_SCREEN)
+            sys.stdout.flush()
+            # A tmux pane resize arrives as SIGWINCH. Tell the renderer at once
+            # rather than waiting for the periodic announce.
+            signal.signal(signal.SIGWINCH, lambda *_: self.announce_size())
+
+        self.announce_size()
+        if self.send_size:
+            rospy.Timer(rospy.Duration(2.0), lambda _e: self.announce_size())
+
+    # ------------------------------------------------------------------ size
+
+    def terminal_size(self):
+        try:
+            cols, rows = shutil.get_terminal_size()
+        except Exception:
+            return (100, 30)
+        usable = max(4, rows - (RESERVED_ROWS if self.status else 1))
+        return (max(8, cols), usable)
+
+    def announce_size(self):
+        if not self.send_size or not self.interactive:
+            return
+        cols, rows = self.terminal_size()
+        if (cols, rows) == self.size:
+            return
+        self.size = (cols, rows)
+        msg = TermSize()
+        msg.header.stamp = rospy.Time.now()
+        msg.cols, msg.rows = cols, rows
+        try:
+            self.size_pub.publish(msg)
+        except rospy.ROSException:
+            pass
+        self.cleared = False   # force a full repaint at the new size
+
+    # ----------------------------------------------------------------- paint
+
+    def on_frame(self, msg):
+        now = rospy.Time.now()
+        if self.last_wall is not None:
+            dt = (now - self.last_wall).to_sec()
+            if dt > 0:
+                # Light smoothing, otherwise the number is unreadable.
+                self.fps = 0.7 * self.fps + 0.3 * (1.0 / dt)
+        self.last_wall = now
+        self.frames += 1
+        self.last_bytes = len(msg.ansi)
+
+        if not self.interactive:
+            sys.stdout.write(msg.ansi + "\n")
+            sys.stdout.flush()
+            return
+
+        age_ms = (now - msg.header.stamp).to_sec() * 1000.0
+
+        out = []
+        if not self.cleared:
+            out.append(CLEAR_SCREEN)
+            self.cleared = True
+        out.append(HOME)
+        for line in msg.ansi.split("\n"):
+            out.append(line)
+            out.append(CLEAR_LINE)
+            out.append("\n")
+        if self.status:
+            out.append(RESET)
+            out.append(self.status_line(msg, age_ms))
+            out.append(CLEAR_LINE)
+        out.append(CLEAR_BELOW)
+
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    def status_line(self, msg, age_ms):
+        cols = self.terminal_size()[0]
+        # Red when the picture is more than a quarter second old; at that point
+        # you are steering by something that already happened.
+        colour = "\x1b[31m" if age_ms > 250 else "\x1b[32m"
+        text = ("%s  %dx%d chars  src %dx%d %s  %.1f Hz  "
+                % (msg.header.frame_id, msg.cols, msg.rows,
+                   msg.src_width, msg.src_height, msg.encoding, self.fps))
+        tail = "age %s%.0f ms%s  %.1f kB" % (colour, age_ms, RESET,
+                                             self.last_bytes / 1024.0)
+        # Trim on the left part only; the numbers on the right are the point.
+        budget = cols - len(tail) + len(colour) + len(RESET) - 1
+        if budget > 4 and len(text) > budget:
+            text = text[:budget - 1] + " "
+        return "\x1b[7m" + text + tail + RESET
+
+    def shutdown(self):
+        if self.interactive:
+            sys.stdout.write(RESET + SHOW_CURSOR + "\n")
+            sys.stdout.flush()
+
+
+def main():
+    rospy.init_node("squint_view", anonymous=True)
+    view = SquintView()
+    rospy.on_shutdown(view.shutdown)
+    try:
+        rospy.spin()
+    finally:
+        view.shutdown()
+
+
+if __name__ == "__main__":
+    main()

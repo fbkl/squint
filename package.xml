@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>squint</name>
+  <version>0.1.0</version>
+  <description>
+    Look at a camera through a keyhole. Renders an image topic into coloured
+    terminal characters on the machine that owns the camera, and publishes the
+    few kilobytes of escape codes instead of the few hundred kilobytes of pixels.
+    Built so remote cameras can be eyeballed from a tmux pane over a wifi link
+    that cannot carry a raw image stream.
+  </description>
+
+  <maintainer email="frkle@todo.todo">frkle</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+  </export>
+</package>

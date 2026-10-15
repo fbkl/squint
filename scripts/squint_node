@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Render an image topic to terminal escape codes, where the camera lives.
+
+Run this ON the machine that owns the camera. It subscribes to the raw image
+locally, which costs nothing, and publishes a few kilobytes of escape codes
+instead of a few hundred kilobytes of pixels. A squint_view somewhere else
+prints them.
+
+Why not just let the viewer subscribe to the image and render it there: because
+the whole point is to not put the image on the wire. A 640x480 mono8 frame is
+307 kB; the same frame as 100x30 characters is about 30 kB, and we only want it
+a few times a second.
+
+Why publish a string instead of printing here: a node started by roslaunch on a
+remote machine has nowhere to print to. Its stdout goes into a log file nobody
+is watching.
+"""
+
+import rospy
+from sensor_msgs.msg import Image
+from squint.msg import AnsiFrame, TermSize
+from squint.render import decode_image, to_ansi
+
+
+class SquintNode(object):
+
+    def __init__(self):
+        self.cols = rospy.get_param("~cols", 100)
+        self.rows = rospy.get_param("~rows", 30)
+        self.rate = rospy.get_param("~rate", 4.0)
+        self.quantize = rospy.get_param("~quantize", 0)
+        self.palette = rospy.get_param("~palette", "256")
+        self.autosize = rospy.get_param("~autosize", True)
+        # Hard ceiling so a bad TermSize cannot ask for a 10000-column render.
+        self.max_cols = rospy.get_param("~max_cols", 400)
+        self.max_rows = rospy.get_param("~max_rows", 150)
+
+        if self.palette not in ("256", "truecolor"):
+            rospy.logwarn("squint: unknown palette %r, using 256", self.palette)
+            self.palette = "256"
+
+        self.latest = None
+        self.dropped = 0
+        self.rendered = 0
+
+        self.pub = rospy.Publisher("~ansi", AnsiFrame, queue_size=1)
+
+        # buff_size well above one frame, otherwise rospy reassembles large
+        # images across reads and the latency creeps up for no reason.
+        self.sub = rospy.Subscriber("image", Image, self.on_image,
+                                    queue_size=1, buff_size=2 ** 24)
+
+        if self.autosize:
+            rospy.Subscriber("~size", TermSize, self.on_size, queue_size=1)
+
+        self.timer = rospy.Timer(rospy.Duration(1.0 / max(self.rate, 0.1)),
+                                 self.on_tick)
+
+        rospy.loginfo("squint: %s -> %s at %.1f Hz, %dx%d chars, palette %s",
+                      rospy.resolve_name("image"),
+                      rospy.resolve_name("~ansi"),
+                      self.rate, self.cols, self.rows, self.palette)
+
+    def on_image(self, msg):
+        # Keep only the newest. Rendering is slower than the camera and we are
+        # not a recorder -- an old frame is worse than no frame.
+        if self.latest is not None:
+            self.dropped += 1
+        self.latest = msg
+
+    def on_size(self, msg):
+        cols = max(8, min(int(msg.cols), self.max_cols))
+        rows = max(4, min(int(msg.rows), self.max_rows))
+        if (cols, rows) != (self.cols, self.rows):
+            rospy.loginfo("squint: viewer resized me to %dx%d", cols, rows)
+            self.cols, self.rows = cols, rows
+
+    def on_tick(self, _event):
+        # Do no work at all if nobody is looking. This runs next to a VIO
+        # pipeline on a pi; an idle viewer should cost zero CPU.
+        if self.pub.get_num_connections() == 0:
+            self.latest = None
+            return
+
+        msg = self.latest
+        self.latest = None
+        if msg is None:
+            return
+
+        try:
+            rgb = decode_image(msg)
+            ansi = to_ansi(rgb, self.cols, self.rows,
+                           quantize=self.quantize, palette=self.palette)
+        except Exception as exc:
+            rospy.logerr_throttle(5.0, "squint: cannot render: %s" % exc)
+            return
+
+        out = AnsiFrame()
+        # Source stamp, not now(): the viewer reports true end-to-end age.
+        out.header.stamp = msg.header.stamp or rospy.Time.now()
+        out.header.frame_id = rospy.resolve_name("image")
+        out.cols = self.cols
+        out.rows = self.rows
+        out.src_width = msg.width
+        out.src_height = msg.height
+        out.encoding = msg.encoding
+        out.ansi = ansi
+        self.pub.publish(out)
+
+        self.rendered += 1
+        if self.rendered % 100 == 0:
+            rospy.logdebug("squint: %d rendered, %d skipped, last %d bytes",
+                           self.rendered, self.dropped, len(ansi))
+
+
+def main():
+    rospy.init_node("squint_node")
+    SquintNode()
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    main()
