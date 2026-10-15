@@ -20,6 +20,7 @@ from squint.msg import AnsiFrame, TermSize
 HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
 HOME = "\x1b[H"
+GOTO = "\x1b[%d;1H"      # absolute row, column 1
 CLEAR_SCREEN = "\x1b[2J"
 CLEAR_LINE = "\x1b[K"
 CLEAR_BELOW = "\x1b[J"
@@ -28,6 +29,12 @@ RESET = "\x1b[0m"
 # Rows we keep for ourselves: one status line, and one so the shell prompt does
 # not scroll the picture off the top when we exit.
 RESERVED_ROWS = 2
+
+# And one column. Writing into the LAST cell of a line leaves the terminal in
+# deferred-wrap state; the next newline then feeds twice and the whole picture
+# walks up the pane one row per frame. Inside a nested tmux that looks like the
+# pane is eating itself. Never touch the last column.
+RESERVED_COLS = 1
 
 
 class SquintView(object):
@@ -73,7 +80,7 @@ class SquintView(object):
         except Exception:
             return (100, 30)
         usable = max(4, rows - (RESERVED_ROWS if self.status else 1))
-        return (max(8, cols), usable)
+        return (max(8, cols - RESERVED_COLS), usable)
 
     def announce_size(self):
         if not self.send_size or not self.interactive:
@@ -111,26 +118,37 @@ class SquintView(object):
 
         age_ms = (now - msg.header.stamp).to_sec() * 1000.0
 
+        # Absolute cursor positioning, never a newline. A newline at the bottom
+        # of a pane SCROLLS it, and a scrolling pane inside a nested tmux fights
+        # the outer session's own redraw. Addressing each row by number cannot
+        # scroll, cannot wrap, and repaints correctly even if we overrun.
+        lines = msg.ansi.split("\n")
+        pane_rows = self.terminal_size()[1] + (RESERVED_ROWS if self.status else 1)
+
         out = []
         if not self.cleared:
             out.append(CLEAR_SCREEN)
             self.cleared = True
-        out.append(HOME)
-        for line in msg.ansi.split("\n"):
+        for i, line in enumerate(lines):
+            if i + 1 >= pane_rows:
+                break               # pane shrank under us; drop the overflow
+            out.append(GOTO % (i + 1))
             out.append(line)
             out.append(CLEAR_LINE)
-            out.append("\n")
         if self.status:
+            out.append(GOTO % min(len(lines) + 1, pane_rows - 1))
             out.append(RESET)
             out.append(self.status_line(msg, age_ms))
             out.append(CLEAR_LINE)
+        # Wipe whatever the previous, taller frame left below us.
+        out.append(GOTO % min(len(lines) + 2, pane_rows))
         out.append(CLEAR_BELOW)
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
     def status_line(self, msg, age_ms):
-        cols = self.terminal_size()[0]
+        cols = self.terminal_size()[0]   # already has RESERVED_COLS taken off
         # Red when the picture is more than a quarter second old; at that point
         # you are steering by something that already happened.
         colour = "\x1b[31m" if age_ms > 250 else "\x1b[32m"
