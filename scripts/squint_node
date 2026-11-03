@@ -29,6 +29,9 @@ class SquintNode(object):
         self.rows = rospy.get_param("~rows", 30)
         self.rate = rospy.get_param("~rate", 4.0)
         self.quantize = rospy.get_param("~quantize", 0)
+        # Point sampling by default: block averaging costs ~110 ms per frame on
+        # an rpi5 against ~0, and this is a viewfinder, not a measurement.
+        self.sample = rospy.get_param("~sample", True)
         self.palette = rospy.get_param("~palette", "256")
         self.autosize = rospy.get_param("~autosize", True)
         self.keep_aspect = rospy.get_param("~keep_aspect", True)
@@ -63,10 +66,11 @@ class SquintNode(object):
         self.timer = rospy.Timer(rospy.Duration(1.0 / max(self.rate, 0.1)),
                                  self.on_tick)
 
-        rospy.loginfo("squint: %s -> %s at %.1f Hz, %dx%d chars, palette %s",
+        rospy.loginfo("squint: %s -> %s at %.1f Hz, %dx%d chars, palette %s, %s",
                       rospy.resolve_name("image"),
                       rospy.resolve_name("~ansi"),
-                      self.rate, self.cols, self.rows, self.palette)
+                      self.rate, self.cols, self.rows, self.palette,
+                      "sampled" if self.sample else "averaged")
 
     def on_image(self, msg):
         # Keep only the newest. Rendering is slower than the camera and we are
@@ -115,7 +119,8 @@ class SquintNode(object):
             rgb = decode_image(msg)
             self.cols, self.rows = self.fit(msg.width, msg.height)
             ansi = to_ansi(rgb, self.cols, self.rows,
-                           quantize=self.quantize, palette=self.palette)
+                           quantize=self.quantize, palette=self.palette,
+                           sample=self.sample)
         except Exception as exc:
             rospy.logerr_throttle(5.0, "squint: cannot render: %s" % exc)
             return

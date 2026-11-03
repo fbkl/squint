@@ -118,7 +118,38 @@ def block_mean(img, out_h, out_w):
     return (total // np.maximum(area, 1)).astype(np.uint8)
 
 
-def to_ansi(rgb, cols, rows, quantize=0, palette="truecolor"):
+def block_sample(img, out_h, out_w):
+    """Nearest neighbour: one source pixel per output cell, from its centre.
+
+    block_mean has to touch every source pixel to build the integral image, so
+    it costs O(H*W) however small the render is. Measured on an rpi5 with a
+    640x480 frame into 120x40 characters: 111 ms of a 126 ms render, about 88%
+    of the whole thing. This reads out_h*out_w pixels instead -- 4800 against
+    307200 -- and the cost scales with the terminal, not the camera.
+
+    The price is aliasing, and it is a real price. One sampled pixel does not
+    represent its block, so thin high-contrast features (a cable, the edge of a
+    marker) shimmer as the camera moves, and sensor noise is no longer averaged
+    out. For a viewfinder that is a fair trade; for anything you intend to
+    measure from, it is not.
+    """
+    h, w = img.shape[:2]
+    out_h = max(1, min(int(out_h), h))
+    out_w = max(1, min(int(out_w), w))
+
+    # Bin CENTRES: (2i+1)*h // (2*out_h). Sampling at bin starts -- the obvious
+    # (i*h)//out_h -- biases the whole picture up and to the left by half a
+    # block, which is visible as a shift when you toggle between the two modes.
+    ys = ((np.arange(out_h) * 2 + 1) * h) // (2 * out_h)
+    xs = ((np.arange(out_w) * 2 + 1) * w) // (2 * out_w)
+
+    # np.ix_ of two index arrays indexes the first two axes and leaves the
+    # colour axis alone, giving (out_h, out_w, 3).
+    return img[np.ix_(ys, xs)]
+
+
+def to_ansi(rgb, cols, rows, quantize=0, palette="truecolor",
+            sample=True):
     """(H, W, 3) uint8 -> a string of `rows` lines of `cols` characters.
 
     Two pixels per character, so the image is averaged down to (rows*2, cols).
@@ -133,11 +164,16 @@ def to_ansi(rgb, cols, rows, quantize=0, palette="truecolor"):
     `quantize` rounds each channel to a multiple of N before comparing, buying
     repeats at the cost of banding. `palette` of "256" does the same thing by
     snapping to the xterm colour cube, and emits shorter escapes as well.
+
+    `sample` picks how the image is shrunk: point sampling (default, cheap) or
+    block averaging (exact, and roughly ten times the total render cost). See
+    block_sample.
     """
     cols = max(1, int(cols))
     rows = max(1, int(rows))
 
-    small = block_mean(rgb, rows * 2, cols)
+    shrink = block_sample if sample else block_mean
+    small = shrink(rgb, rows * 2, cols)
 
     if quantize and quantize > 1:
         q = int(quantize)
